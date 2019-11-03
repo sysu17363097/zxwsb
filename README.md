@@ -1,122 +1,187 @@
-#include <unistd.h>
-#include <sys/types.h>
-#include <pthread.h>
-#include <semaphore.h>
-
-#include <stdlib.h>
-#include <stdio.h>
-#include <errno.h>
-#include <string.h>
-#define CONSUMERS_COUNT 1
-#define PRODUCERS_COUNT 1
-#define BUFFSIZE 10
-
-int g_buffer[BUFFSIZE];
-
-unsigned short in = 0;
-unsigned short out = 0;
-unsigned short produce_id = 0;
-unsigned short consume_id = 0;
-
-sem_t g_sem_full;
-sem_t g_sem_empty;
-pthread_mutex_t g_mutex;
-
-pthread_t g_thread[CONSUMERS_COUNT + PRODUCERS_COUNT];
-
-void *consume(void *arg)
-{
-    int i;
-    int num = (int)arg;
-    while (1)
-    {
-        printf("%d wait buffer not empty\n", num);
-        sem_wait(&g_sem_empty);
-        pthread_mutex_lock(&g_mutex);
-
-        for (i = 0; i < BUFFSIZE; i++)
-        {
-            printf("%02d ", i);
-            if (g_buffer[i] == -1)
-                printf("%s", "null");
-            else
-                printf("%d", g_buffer[i]);
-
-            if (i == out)
-                printf("\t<--consume");
-
-            printf("\n");
-        }
-        consume_id = g_buffer[out];
-        printf("%d begin consume product %d\n", num, consume_id);
-        g_buffer[out] = -1;
-        out = (out + 1) % BUFFSIZE;
-        printf("%d end consume product %d\n", num, consume_id);
-        pthread_mutex_unlock(&g_mutex);
-        sem_post(&g_sem_full);
-        sleep(1);
-    }
-    return NULL;
-}
-
-void *produce(void *arg)
-{
-    int num = (int)arg;
-    int i;
-    while (1)
-    {
-        printf("%d wait buffer not full\n", num);
-        sem_wait(&g_sem_full);
-        pthread_mutex_lock(&g_mutex);
-        for (i = 0; i < BUFFSIZE; i++)
-        {
-            printf("%02d ", i);
-            if (g_buffer[i] == -1)
-                printf("%s", "null");
-            else
-                printf("%d", g_buffer[i]);
-
-            if (i == in)
-                printf("\t<--produce");
-
-            printf("\n");
-        }
-
-        printf("%d begin produce product %d\n", num, produce_id);
-        g_buffer[in] = produce_id;
-        in = (in + 1) % BUFFSIZE;
-        printf("%d end produce product %d\n", num, produce_id++);
-        pthread_mutex_unlock(&g_mutex);
-        sem_post(&g_sem_empty);
-        sleep(5);
-    }
-    return NULL;
-}
-
-int main(void)
-{
-    int i;
-    for (i = 0; i < BUFFSIZE; i++)
-        g_buffer[i] = -1;
-
-    sem_init(&g_sem_full, 0, BUFFSIZE);
-    sem_init(&g_sem_empty, 0, 0);
-
-    pthread_mutex_init(&g_mutex, NULL);
-
-
-    for (i = 0; i < CONSUMERS_COUNT; i++)
-        pthread_create(&g_thread[i], NULL, consume, (void *)i);
-
-    for (i = 0; i < PRODUCERS_COUNT; i++)
-        pthread_create(&g_thread[CONSUMERS_COUNT + i], NULL, produce, (void *)i);
-
-    for (i = 0; i < CONSUMERS_COUNT + PRODUCERS_COUNT; i++)
-        pthread_join(g_thread[i], NULL);
-
-    sem_destroy(&g_sem_full);
-    sem_destroy(&g_sem_empty);
-    pthread_mutex_destroy(&g_mutex);
-
-    return 0;
+#include <stdlib.h>   
+#include <pthread.h>   
+#include <assert.h>   
+  
+#ifdef _WIN32   
+#   include <windows.h>   
+#   define SLEEP(ms) Sleep(ms)   
+#elif defined(LINUX)   
+#   include <unistd.h>   
+#   define SLEEP(ms) sleep(ms)   
+#endif   
+  
+#define QUEUE_SIZE  10   
+#define LOOP        20   
+  
+void* producer (void *args);  
+void* consumer (void *args);  
+  
+typedef struct  
+{  
+    int buf[QUEUE_SIZE];  
+    long head, tail;  
+    bool full, empty;  
+    pthread_mutex_t *mutex;  
+    pthread_cond_t *notFull, *notEmpty;  
+} Queue;  
+  
+Queue*  queueInit (void);  
+void    queueDelete (Queue *q);  
+void    queueAdd (Queue *q, int in);  
+void    queueDel (Queue *q, int *out);  
+  
+int main(int argc, char* argv[])  
+{  
+    Queue* fifo = queueInit ();  
+    assert(fifo !=  NULL);  
+  
+    pthread_t pro, con;  
+    pthread_create (&pro, NULL, &producer, fifo);  
+    pthread_create (&con, NULL, &consumer, fifo);  
+    pthread_join (pro, NULL);  
+    pthread_join (con, NULL);  
+    queueDelete (fifo);  
+    return 0;  
+}  
+  
+void* producer (void *q)  
+{  
+    Queue* fifo = (Queue *)q;  
+  
+    for (int i = 0; i < LOOP; i++)  
+    {  
+        // 临界区操作：若队列未满，添加新数据   
+        pthread_mutex_lock (fifo->mutex);  
+        while (fifo->full)  
+        {  
+            printf ("producer: Queue FULL.\n");  
+            pthread_cond_wait (fifo->notFull, fifo->mutex);  
+        }  
+        queueAdd (fifo, i);  
+        pthread_mutex_unlock (fifo->mutex);  
+  
+        // 数据添加结束，发“队列有数据”信号   
+        pthread_cond_signal (fifo->notEmpty);  
+        SLEEP (100);  
+    }  
+  
+    // 与上面类似   
+    for (int i = 0; i < LOOP; i++)  
+    {  
+        pthread_mutex_lock (fifo->mutex);  
+        while (fifo->full)  
+        {  
+            printf ("producer: Queue FULL.\n");  
+            pthread_cond_wait (fifo->notFull, fifo->mutex);  
+        }  
+        queueAdd (fifo, i);  
+        pthread_mutex_unlock (fifo->mutex);  
+        pthread_cond_signal (fifo->notEmpty);  
+        SLEEP (200);  
+    }  
+    return (NULL);  
+}  
+  
+void* consumer (void *q)  
+{  
+    int d;  
+  
+    Queue *fifo = (Queue *)q;  
+  
+    for (int i = 0; i < LOOP; i++)  
+    {  
+        // 临界区操作：若队列不空，则取出数据   
+        pthread_mutex_lock (fifo->mutex);  
+        while (fifo->empty)  
+        {  
+            printf ("consumer: Queue EMPTY.\n");  
+            pthread_cond_wait (fifo->notEmpty, fifo->mutex);  
+        }  
+        queueDel (fifo, &d);  
+        pthread_mutex_unlock (fifo->mutex);  
+  
+        // 取完数据，发“队列不满”信号   
+        pthread_cond_signal (fifo->notFull);  
+        printf ("consumer: recieved %d.\n", d);  
+        SLEEP(200);  
+    }  
+  
+    // 与上面类似   
+    for (int i = 0; i < LOOP; i++)  
+    {  
+        pthread_mutex_lock (fifo->mutex);  
+        while (fifo->empty)  
+        {  
+            printf ("consumer: Queue EMPTY.\n");  
+            pthread_cond_wait (fifo->notEmpty, fifo->mutex);  
+        }  
+        queueDel (fifo, &d);  
+        pthread_mutex_unlock (fifo->mutex);  
+        pthread_cond_signal (fifo->notFull);  
+        printf ("consumer: recieved %d.\n", d);  
+        SLEEP (50);  
+    }  
+    return (NULL);  
+}  
+  
+Queue *queueInit (void)  
+{  
+    Queue *q = (Queue *)malloc (sizeof (Queue));  
+    if (q == NULL) return (NULL);  
+  
+    q->empty = true;  
+    q->full = false;  
+    q->head = 0;  
+    q->tail = 0;  
+  
+    q->mutex = (pthread_mutex_t *) malloc (sizeof (pthread_mutex_t));  
+    pthread_mutex_init (q->mutex, NULL);  
+    q->notFull = (pthread_cond_t *) malloc (sizeof (pthread_cond_t));  
+    pthread_cond_init (q->notFull, NULL);  
+    q->notEmpty = (pthread_cond_t *) malloc (sizeof (pthread_cond_t));  
+    pthread_cond_init (q->notEmpty, NULL);  
+      
+    return (q);  
+}  
+  
+void queueDelete (Queue *q)  
+{  
+    pthread_mutex_destroy (q->mutex);  
+    free (q->mutex);   
+  
+    pthread_cond_destroy (q->notFull);  
+    free (q->notFull);  
+  
+    pthread_cond_destroy (q->notEmpty);  
+    free (q->notEmpty);  
+  
+    free (q);  
+}  
+  
+void queueAdd (Queue *q, int in)  
+{  
+    q->buf[q->tail] = in;  
+    q->tail++;  
+    if (q->tail == QUEUE_SIZE)   // 循环队列   
+        q->tail = 0;  
+  
+    if (q->tail == q->head)       // 添加数据时“触顶”   
+        q->full = true;  
+    q->empty = false;  
+  
+    return;  
+}  
+  
+void queueDel (Queue *q, int *out)  
+{  
+    *out = q->buf[q->head];  
+    q->head++;  
+    if (q->head == QUEUE_SIZE)   // 循环队列   
+        q->head = 0;  
+  
+    if (q->head == q->tail)       // 取出数据时“触底”   
+        q->empty = true;  
+    q->full = false;  
+  
+    return;  
 }
